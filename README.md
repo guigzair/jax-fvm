@@ -15,7 +15,7 @@ JAX-FVM is Automatic Differentiation (AD) + Finite Volume Method (FVM)
 
 ## Examples
 Example concerning the forward facing step case, 
-![Example concerning the forward facing step case, density is displayed](image.png)
+![Example concerning the forward facing step case, density is displayed](images/image.png)
 
 ## License
 This project is licensed under the GNU General Public License v3 - see the LICENSE for details. For commercial use, contact Guillaume de Romémont (guillaume at romemont dot protonmail dot com)
