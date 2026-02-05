@@ -3,11 +3,11 @@ import jax
 import sys
 
 sys.path.append('../../../..')  
-from FVM.src.mesh.mesh import Mesh
-import FVM.src.Cases.Test_Cases as Test_Cases
-import FVM.src.mesh.Mesh_cases as Mesh_cases
+from FVM.src.mesh.mesh import Mesh # pyright: ignore[reportMissingImports]
+import FVM.src.Cases.Test_Cases as Test_Cases # pyright: ignore[reportMissingImports]
+import FVM.src.mesh.Mesh_cases as Mesh_cases # pyright: ignore[reportMissingImports]
 import time
-import FVM.src.solvers.Euler.helper as Euler_helper
+import FVM.src.solvers.Euler.helper as Euler_helper # pyright: ignore[reportMissingImports]
 
 """
 Finite Volume Method for 2D Euler equations
@@ -64,10 +64,13 @@ def BC_inflow(W, mesh, bc_type = 3, value = jnp.array([1.0, 1.0, 1.0, 1.0])):
 	W = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), value, W)
 	return W	
 
-def BC_slipwall(W_R, W_L, mesh, bc_type = 2):
+def BC_noslip_wall(W_R, W_L, mesh, bc_type = 2):
 	Prim_L = Euler_helper.getPrimitive(W_L)
 	vn = (Prim_L[...,1] * mesh.normals[...,0] + Prim_L[...,2] * mesh.normals[...,1])
-	vb = Prim_L[...,1:3] - 2 * vn[...,None] * mesh.normals
+	vt = (- Prim_L[...,1] * mesh.normals[...,1] + Prim_L[...,2] * mesh.normals[...,0])
+
+	vb = Prim_L[...,1:3] - 2 * vn[...,None] * mesh.normals - 2 * vt[...,None] * jnp.stack([-mesh.normals[...,1], mesh.normals[...,0]], axis=-1)
+
 	Prim_b = Prim_L.at[...,1:3].set(vb)
 	W_b = Euler_helper.getConserved(Prim_b)
 	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
@@ -75,7 +78,7 @@ def BC_slipwall(W_R, W_L, mesh, bc_type = 2):
 
 def BC_state(W_R, W_L, mesh, **kwargs):
 	value = kwargs.get('value', jnp.array([1.0, 1.0, 1.0, 1.0]))
-	W_R = BC_slipwall(W_R, W_L, mesh, bc_type=2)  # (slip-wall)
+	W_R = BC_noslip_wall(W_R, W_L, mesh, bc_type=2)  # (slip-wall)
 	W_R = BC_inflow(W_R, mesh, bc_type=3, value = value)  # (supersonic inlet)
 	W_R = BC_outflow(W_R, W_L, mesh, bc_type=4)  # (free outflow)
 	return W_R
@@ -125,9 +128,6 @@ def getFlux_convective(W_L, W_R, mesh, gamma = 1.4):
 
 	# Total flux
 	alpha = 0.1
-	# local_mach = jnp.maximum(jnp.abs(u_L)/jnp.maximum(C_L, 1e-09), jnp.abs(u_R)/jnp.maximum(C_R, 1e-09))
-	# alpha = jnp.sin(jnp.pi * local_mach /2)  # andea s damping 2024
-	# alpha = jnp.where(local_mach >= 1, 1.0, alpha)
 
 	flux_rho = (flux_rho_L + flux_rho_R)/2 - alpha * C_max * 0.5 * (rho_R - rho_L)
 	flux_ru =(flux_ru_L + flux_ru_R)/2 - alpha * C_max * 0.5 * (rho_R * u_R - rho_L * u_L)
@@ -150,12 +150,10 @@ def getFlux_diffusive(grad_prim, Prim_L, Prim_R, **kwargs):
 
 	# compute stress tensor
 	div_u = grad_prim[:,1,0] + grad_prim[:,2,1]
-	print("div_u shape:", div_u.shape)
 
 	temp_L = Euler_helper.get_temperature(Prim_L, R = R)
 	temp_R = Euler_helper.get_temperature(Prim_R, R = R)
 	grad_T = Euler_helper.getgradientLSQ(temp_L[...,None], temp_R[...,None], mesh)
-	print("grad_T shape:", grad_T.shape)
 
 	tau = grad_prim[...,1:3,:] + jnp.transpose(grad_prim[...,1:3,:], (0,2,1))
 	tau = tau - 2/3 * jnp.einsum('ij,kl->ikl', div_u[...,None],jnp.eye(2))
@@ -166,7 +164,6 @@ def getFlux_diffusive(grad_prim, Prim_L, Prim_R, **kwargs):
 	tau_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] > 1)[...,None,None], 2, axis=-2), tau_L, tau_R)
 
 	Flux_tau = 1/2 * (tau_L + tau_R)
-	print("Flux_tau shape:", Flux_tau.shape)
 
 	# Get corresponding normals
 	nx = mesh.normals[...,0]
@@ -174,13 +171,11 @@ def getFlux_diffusive(grad_prim, Prim_L, Prim_R, **kwargs):
 
 	Flux_tau_x = Flux_tau[...,0,0] * nx + Flux_tau[...,0,1] * ny
 	Flux_tau_y = Flux_tau[...,1,0] * nx + Flux_tau[...,1,1] * ny
-	print("Flux_tau_x shape:", Flux_tau_x.shape)
 
 	Flux_energy = tau_R[...,0,:] * Prim_R[...,1][...,None] +  tau_R[...,1,:] * Prim_R[...,2][...,None]# q = - k grad(T)  and here we have grad(u) instead of grad(T)
 	Flux_energy = Flux_energy + tau_L[...,0,:] * Prim_L[...,1][...,None] +  tau_L[...,1,:] * Prim_L[...,2][...,None]
 	Flux_energy = 0.5 * (Flux_energy[...,0] * nx + Flux_energy[...,1] * ny)
 	Flux_energy = Flux_energy + k * (grad_T[...,0] * nx + grad_T[...,1] * ny)
-	print("Flux_energy shape:", Flux_energy.shape)
 
 	surfaces = mesh.surface[mesh.face_connectivity]
 
@@ -194,7 +189,7 @@ def getFlux_diffusive(grad_prim, Prim_L, Prim_R, **kwargs):
 	return Flux
 
 
-# @jax.jit(static_argnums=(1,))
+@jax.jit(static_argnums=(1,))
 def time_step(W, mesh, dt, **kwargs):
 
 	# 1st order
@@ -204,6 +199,10 @@ def time_step(W, mesh, dt, **kwargs):
 	# 2nd order - MUSCL with least-square gradient
 	W_R = BC_state(W_R, W_L, mesh)
 	grad = Euler_helper.getgradientLSQ(W_L, W_R, mesh)
+
+	# Vorticity
+	grad_Prim = Euler_helper.getgradientLSQ(Euler_helper.getPrimitive(W_L), Euler_helper.getPrimitive(W_R), mesh)
+	vorticity = Euler_helper.get_vorticity(grad_Prim)	
 
 
 	W_L, W_R = MUSCL(W_L, W_R, grad, mesh)
@@ -219,12 +218,12 @@ def time_step(W, mesh, dt, **kwargs):
 
 
 	W = W - dt / mesh.area[...,None] * (Flux - Flux_diffusive) 
-	return W
+	return W, vorticity
 
 
 if __name__ == "__main__":
 	# for air at 300K
-	mu = 1.716e-5
+	mu = 1.716e-4
 	R = 287
 	gamma = 1.4
 	C_v = R / (gamma - 1)
@@ -237,14 +236,14 @@ if __name__ == "__main__":
 	mesh = Mesh_cases.TestDipoleVortex().build(h = 5e-5, L = 1.)
 
 	# Initial condition
-	Primitives, mesh = Test_Cases.TestDipoleVortex2(R = 0.05, omega = 300, mach = 0.01).build(mesh)
+	Primitives, mesh = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
 	
 	W = Euler_helper.getConserved(Primitives)
 
 	mesh.plot_mesh()
 
 	# Time loop
-	t_final = 0.05 #/ jnp.mean(Primitives[...,1]) # to get real time
+	t_final = 0.2 #/ jnp.mean(Primitives[...,1]) # to get real time
 	CFL = 0.05
 	dx_min = jnp.min(jnp.sqrt(mesh.area))
 	c = jnp.sqrt(1.4 * Primitives[...,3] / Primitives[...,0])
@@ -253,11 +252,18 @@ if __name__ == "__main__":
 
 	start_time = time.time()
 
-	for n in range(1):
-		W = time_step(W, mesh, dt, **kwargs)
+	E = []
+	Enstrophy = []
+	for n in range(N_t):
+		W, vorticity = time_step(W, mesh, dt, **kwargs)
 		# W = times_step_Newton(W, mesh, dt)
 		if n % 100 == 0:
 			print(f'time: {n} / {N_t}')
+		if n % 1000 == 0:
+			Prim = Euler_helper.getPrimitive(W)
+			energy = 0.5 * jnp.sum((Prim[...,1]**2 + Prim[...,2]**2) * mesh.area)
+			E.append(energy)
+			Enstrophy.append(jnp.sum(vorticity**2* mesh.area) )
 	print(f'Simulation time: {time.time() - start_time} seconds')
 
 	# Plot solution
@@ -274,3 +280,31 @@ if __name__ == "__main__":
 	grad = Euler_helper.getgradientLSQ(Euler_helper.getPrimitive(W_L), Euler_helper.getPrimitive(W_R), mesh)
 	vorticity = Euler_helper.get_vorticity(grad)	
 	mesh.plot_solution(vorticity, labels = r'$\omega$')
+
+import matplotlib.pyplot as plt
+size = 14
+params = {
+    'text.usetex': True,
+    'font.family': 'serif',
+    'font.serif': 'cm',  # Computer Modern font
+	'legend.fontsize':size,
+    'axes.labelsize' : size,
+	'axes.titlesize' : size +2,
+    'xtick.labelsize' : size+1,
+    'ytick.labelsize' : size+1
+}
+plt.rcParams.update(params)
+
+E = jnp.array(E)
+fig, ax = plt.subplots()
+ax.plot(jnp.arange(E.shape[0]) * 1000 * dt, E)
+ax.grid()
+ax.set_xlabel(r't')
+ax.set_ylabel(r'$E_k$')
+
+Enstrophy = jnp.array(Enstrophy)
+fig, ax = plt.subplots()
+ax.plot(jnp.arange(Enstrophy.shape[0]) * 1000 * dt, Enstrophy/2)
+ax.grid()
+ax.set_xlabel(r't')
+ax.set_ylabel(r'$\xi$')

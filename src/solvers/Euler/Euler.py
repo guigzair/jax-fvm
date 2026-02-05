@@ -172,9 +172,9 @@ def time_step(W, mesh, dt, alpha = 1.):
 	W_R = BC_state(W_R, W_L, mesh)
 	grad = Euler_helper.getgradientLSQ(W_L, W_R, mesh)
 
-	# # Vorticity
-	# grad_Prim = Euler_helper.getgradientLSQ(Euler_helper.getPrimitive(W_L), Euler_helper.getPrimitive(W_R), mesh)
-	# vorticity = Euler_helper.get_vorticity(grad_Prim)	
+	# Vorticity
+	grad_Prim = Euler_helper.getgradientLSQ(Euler_helper.getPrimitive(W_L), Euler_helper.getPrimitive(W_R), mesh)
+	vorticity = Euler_helper.get_vorticity(grad_Prim)	
 
 	W_L, W_R = MUSCL(W_L, W_R, grad, mesh)
 	W_R = BC_state(W_R, W_L, mesh)
@@ -182,7 +182,7 @@ def time_step(W, mesh, dt, alpha = 1.):
 	Flux = getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = alpha)
 		
 	W = W - dt / mesh.area[...,None] * (Flux) 
-	return W
+	return W, vorticity
 
 def residual(W, W_old, mesh, dt):
 	# 1st order
@@ -239,7 +239,7 @@ if __name__ == "__main__":
 	mesh.plot_mesh()
 
 	# Time loop
-	t_final = 0.15 #/ jnp.mean(Primitives[...,1]) # to get real time
+	t_final = 0.2 #/ jnp.mean(Primitives[...,1]) # to get real time
 	CFL = 0.05
 	dx_min = jnp.min(jnp.sqrt(mesh.area))
 	c = jnp.sqrt(1.4 * Primitives[...,3] / Primitives[...,0])
@@ -251,10 +251,16 @@ if __name__ == "__main__":
 	E = []
 	Enstrophy = []
 	for n in range(N_t):
-		W = time_step(W, mesh, dt, alpha = 0.1)
+		W, vorticity = time_step(W, mesh, dt, alpha = 0.1)
 		# W = times_step_Newton(W, mesh, dt)
 		if n % 100 == 0:
 			print(f'time: {n} / {N_t}')
+		if n % 1000 == 0:
+			Prim = Euler_helper.getPrimitive(W)
+			energy = 0.5 * jnp.sum((Prim[...,1]**2 + Prim[...,2]**2) * mesh.area)
+			E.append(energy)
+			Enstrophy.append(jnp.sum(vorticity**2* mesh.area) )
+			
 
 	print(f'Simulation time: {time.time() - start_time} seconds')
 
@@ -266,5 +272,32 @@ if __name__ == "__main__":
 	mesh.plot_solution(Primitives[...,3], labels = r'$P$')
 
 	# vorticity
-	# mesh.plot_solution(vorticity, labels = r'$\omega$')
+	mesh.plot_solution(vorticity, labels = r'$\omega$')
 
+	import matplotlib.pyplot as plt
+	size = 14
+	params = {
+		'text.usetex': True,
+		'font.family': 'serif',
+		'font.serif': 'cm',  # Computer Modern font
+		'legend.fontsize':size,
+		'axes.labelsize' : size,
+		'axes.titlesize' : size +2,
+		'xtick.labelsize' : size+1,
+		'ytick.labelsize' : size+1
+	}
+	plt.rcParams.update(params)
+
+	E = jnp.array(E)
+	fig, ax = plt.subplots()
+	ax.plot(jnp.arange(E.shape[0]) * 1000 * dt, E)
+	ax.grid()
+	ax.set_xlabel(r't')
+	ax.set_ylabel(r'$E_k$')
+
+	Enstrophy = jnp.array(Enstrophy)
+	fig, ax = plt.subplots()
+	ax.plot(jnp.arange(Enstrophy.shape[0]) * 1000 * dt, Enstrophy/2)
+	ax.grid()
+	ax.set_xlabel(r't')
+	ax.set_ylabel(r'$\xi$')
