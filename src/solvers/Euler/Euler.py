@@ -2,11 +2,11 @@ import jax.numpy as jnp
 import jax
 import sys
 sys.path.append('../../../..')  
-from FVM.src.mesh.mesh import Mesh
-import FVM.src.Cases.Test_Cases as Test_Cases
-import FVM.src.mesh.Mesh_cases as Mesh_cases
+from FVM.src.mesh.mesh import Mesh # pyright: ignore[reportMissingImports]
+import FVM.src.Cases.Test_Cases as Test_Cases # pyright: ignore[reportMissingImports]
+import FVM.src.mesh.Mesh_cases as Mesh_cases # pyright: ignore[reportMissingImports]
 import time
-import FVM.src.solvers.Euler.helper as Euler_helper
+import FVM.src.solvers.Euler.helper as Euler_helper # pyright: ignore[reportMissingImports]
 
 """
 Finite Volume Method for 2D Euler equations
@@ -161,6 +161,14 @@ def getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = 1.):
 	Flux = jnp.sum(Flux, axis = -2)
 	return Flux
 
+@jax.jit(static_argnums=(1,))
+def get_dt(W, mesh, CFL = 0.5):
+	Primitives = Euler_helper.getPrimitive(W)
+	c = jnp.sqrt(1.4 * Primitives[...,3] / Primitives[...,0])
+	lambda_max = c[...,None] + jnp.abs(jnp.sum(jnp.repeat(W[...,None,:], 3, axis=-2)[...,1:3] * mesh.normals, axis = -1))
+	dt_unstr = mesh.area / jnp.sum(lambda_max * mesh.surface[mesh.face_connectivity], axis = -1)
+	return jnp.min(dt_unstr) * CFL
+
 
 @jax.jit(static_argnums=(1,))
 def time_step(W, mesh, dt, alpha = 1.):
@@ -219,48 +227,38 @@ def times_step_Newton(W_old, mesh, dt):
 
 
 if __name__ == "__main__":
-	# little test case: Forward facing step
-	mesh = Mesh()
-	# mesh = Mesh_cases.Forward_Step().build(h = 2.5e-4)
 	mesh = Mesh_cases.TestDipoleVortex().build(h = 5e-5, L = 1.)
-	# mesh = Mesh_cases.TestMovingVortex().build(h = 2e-4, L = 1.)
-	# mesh.mesh_generator(maxV=2e-4, marker_boundary=1)
-
 
 	# Initial condition
-	# Primitives = Test_Cases.ForwardFacingStep().build(mesh)
-	# Primitives, mesh = Test_Cases.TestDipoleVortex(R = 0.05, beta = 1/5, mach = 0.01).build(mesh)
 	Primitives, mesh = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
-	# Primitives = Test_Cases.TestMovingVortex(R = 0.05, beta = 1/50, mach = 0.05).build(mesh)
-	# Primitives = Test_Cases.TestMovingAdvection().build(mesh)
-	
 	W = Euler_helper.getConserved(Primitives)
-
 	mesh.plot_mesh()
 
 	# Time loop
 	t_final = 0.2 #/ jnp.mean(Primitives[...,1]) # to get real time
-	CFL = 0.05
-	dx_min = jnp.min(jnp.sqrt(mesh.area))
-	c = jnp.sqrt(1.4 * Primitives[...,3] / Primitives[...,0])
-	dt = CFL * dx_min / jnp.max(jnp.linalg.norm(Primitives[...,1:3], axis = -1) + c)
+	CFL = 0.3
+	dt = get_dt(W, mesh, CFL = CFL)
 	N_t = int(t_final / dt) + 1
 
 	start_time = time.time()
 
 	E = []
 	Enstrophy = []
-	for n in range(N_t):
+	t = 0
+	n = 0
+	for n in range(10000):
+		# dt = get_dt(W, mesh, CFL = CFL)
+
 		W, vorticity = time_step(W, mesh, dt, alpha = 0.1)
 		# W = times_step_Newton(W, mesh, dt)
 		if n % 100 == 0:
-			print(f'time: {n} / {N_t}')
+			# print(f'time: {t:.4f} / {t_final:.3f} seconds')
+			print(f'It : {n} / {N_t}')
 		if n % 1000 == 0:
 			Prim = Euler_helper.getPrimitive(W)
 			energy = 0.5 * jnp.sum((Prim[...,1]**2 + Prim[...,2]**2) * mesh.area)
 			E.append(energy)
 			Enstrophy.append(jnp.sum(vorticity**2* mesh.area) )
-			
 
 	print(f'Simulation time: {time.time() - start_time} seconds')
 
