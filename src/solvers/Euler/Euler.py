@@ -12,6 +12,9 @@ import FVM.src.solvers.Euler.helper as Euler_helper # pyright: ignore[reportMiss
 Finite Volume Method for 2D Euler equations
 With jax.jit compilation = ~ 100x faster for large data
 """
+###########################################################################################################
+##############################                Solver                 ######################################
+###########################################################################################################
 
 def venkatakrishnan(a, b, h = 0, K = 0):
 	omega = (K * h)**3 
@@ -54,51 +57,8 @@ def MUSCL(W_L, W_R, grad, mesh):
 
 	return W_L_MUSCL, W_R_MUSCL
 
-def BC_outflow(W_R, W_L, mesh, bc_type = 4):
-	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_L, W_R)
-	return W_R	
-
-def BC_inflow(W, mesh, bc_type = 3, value = jnp.array([1.0, 1.0, 1.0, 1.0])):
-	W = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), value, W)
-	return W	
-
-def BC_subsonic_inlet(W_R, W_L, mesh, bc_type = 5):
-	Prim_L = Euler_helper.getPrimitive(W_L)
-	Prim_b = Prim_L.at[...,:3].set(mesh.inlet_subsonic[...,:3])
-	
-	rho = Prim_b[...,0]
-	u = Prim_b[...,1]
-	v = Prim_b[...,2]
-	P = Prim_b[...,3]
-	Mass  = rho
-	Mom_x = rho * u 
-	Mom_y = rho * v 
-	Energy = P/(1.4-1) + rho*(u**2 + v**2)
-	W_b = jnp.stack([Mass, Mom_x, Mom_y, Energy], axis = -1)
-
-	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
-	return W_R
-
-
-def BC_slipwall(W_R, W_L, mesh, bc_type = 2, value = jnp.array([0., 0., 0., 0.])):
-	# value is a background flow to subtract
-	Prim_L = Euler_helper.getPrimitive(W_L)
-	vn = (Prim_L[...,1] - value[1]) * mesh.normals[...,0] + (Prim_L[...,2] - value[2]) * mesh.normals[...,1]
-	vb = (Prim_L[...,1:3] - value[1:3]) - 2 * vn[...,None] * mesh.normals
-	Prim_b = Prim_L.at[...,1:3].set(vb + value[1:3])
-	W_b = Euler_helper.getConserved(Prim_b)
-	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
-	return W_R	
-
-def BC_state(W_R, W_L, mesh, **kwargs):
-	# value = kwargs.get('value', jnp.array([1.0, 1.0, 1.0, 1.0]))
-	W_R = BC_slipwall(W_R, W_L, mesh, bc_type=2)  # (slip-wall)
-	W_R = BC_inflow(W_R, mesh, bc_type=3, value = Euler_helper.getConserved(mesh.inlet_subsonic))  # (supersonic inlet)
-	W_R = BC_outflow(W_R, W_L, mesh, bc_type=4)  # (free outflow)
-	W_R = BC_subsonic_inlet(W_R, W_L, mesh, bc_type=5)  # (subsonic inlet)
-	return W_R
-
-def getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = 1.):
+def getFlux(W_L, W_R, normals, surfaces, gamma = 1.4, alpha = 1.):
+	# i did not put mesh as input in order to vmap this function
 	# Get the cell state for each edge
 	rho_L = W_L[...,0]
 	mom_x_L = W_L[...,1]
@@ -118,8 +78,8 @@ def getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = 1.):
 	P_R = (gamma - 1) * (E_R - 0.5 * rho_R * (u_R**2 + v_R**2))
 
 	# Get corresponding normals
-	nx = mesh.normals[...,0]
-	ny = mesh.normals[...,1]
+	nx = normals[...,0]
+	ny = normals[...,1]
 
     # Maximum wavelenghts
 	C_L = jnp.sqrt(jnp.abs(gamma*P_L/rho_L))  + jnp.abs(u_L * nx + v_L * ny)
@@ -152,7 +112,6 @@ def getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = 1.):
 	flux_rv = (flux_rv_L + flux_rv_R)/2 - alpha * C_max * 0.5 * (rho_R * v_R - rho_L * v_L)
 	flux_E = (flux_E_L + flux_E_R)/2 - alpha * C_max * 0.5 * (en_R - en_L)
 
-	surfaces = mesh.surface[mesh.face_connectivity]
 	Flux = jnp.stack([surfaces * flux_rho, 
 						surfaces * flux_ru, 
 						surfaces * flux_rv, 
@@ -160,6 +119,11 @@ def getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = 1.):
 
 	Flux = jnp.sum(Flux, axis = -2)
 	return Flux
+
+
+###########################################################################################################
+############################           Time integration                 ###################################
+###########################################################################################################
 
 @jax.jit(static_argnums=(1,))
 def get_dt(W, mesh, CFL = 0.5):
@@ -169,59 +133,105 @@ def get_dt(W, mesh, CFL = 0.5):
 	dt_unstr = mesh.area / jnp.sum(lambda_max * mesh.surface[mesh.face_connectivity], axis = -1)
 	return jnp.min(dt_unstr) * CFL
 
-
 @jax.jit(static_argnums=(1,))
-def time_step(W, mesh, dt, alpha = 1.):
+def time_step(W, mesh, dt, **kwargs):
 	# 1st order
 	W_L = jnp.repeat(W[...,None,:], 3, axis=-2)
 	W_R = W[mesh.neighbors]
 
 	# 2nd order - MUSCL with least-square gradient
-	W_R = BC_state(W_R, W_L, mesh)
+	W_R = Euler_helper.BC_state(W_R, W_L, mesh)
 	grad = Euler_helper.getgradientLSQ(W_L, W_R, mesh)
 
-	# Vorticity
-	grad_Prim = Euler_helper.getgradientLSQ(Euler_helper.getPrimitive(W_L), Euler_helper.getPrimitive(W_R), mesh)
-	vorticity = Euler_helper.get_vorticity(grad_Prim)	
-
 	W_L, W_R = MUSCL(W_L, W_R, grad, mesh)
-	W_R = BC_state(W_R, W_L, mesh)
+	W_R = Euler_helper.BC_state(W_R, W_L, mesh)
 
-	Flux = getFlux(W_L, W_R, mesh, gamma = 1.4, alpha = alpha)
+	Flux = getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], 
+				gamma = 1.4, alpha = kwargs.get('alpha', 1.)) 
 		
 	W = W - dt / mesh.area[...,None] * (Flux) 
-	return W, vorticity
+	return W
 
-def residual(W, W_old, mesh, dt):
+@jax.jit(static_argnums=(1,))
+def residual(W, mesh, **kwargs):
 	# 1st order
 	W_L = jnp.repeat(W[...,None,:], 3, axis=-2)
 	W_R = W[mesh.neighbors]
 
 	# 2nd order - MUSCL with least-square gradient
-	W_R = BC_state(W_R, W_L, mesh)
+	W_R = Euler_helper.BC_state(W_R, W_L, mesh)
 	grad = Euler_helper.getgradientLSQ(W_L, W_R, mesh)
 
 
 	W_L, W_R = MUSCL(W_L, W_R, grad, mesh)
-	W_R = BC_state(W_R, W_L, mesh)
+	W_R = Euler_helper.BC_state(W_R, W_L, mesh)
 
-	Flux = getFlux(W_L, W_R, mesh, gamma = 1.4)
-		
-	Res = W - W_old + dt / mesh.area[...,None] * (Flux) 
-	return Res
+	Flux = getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], gamma = 1.4, alpha = kwargs.get('alpha', 1.)) 
+	# Flux = jax.vmap(getFlux, 
+	# 			in_axes=(0,0,0,0,None,None))(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], 1.4, kwargs.get('alpha', 1.))
+	
+	return Flux / mesh.area[...,None] 
 
 @jax.jit(static_argnums=(1,))
-def times_step_Newton(W_old, mesh, dt):
-	W = W_old
-	for _ in range(3):
-		Fval = residual(W, W_old, mesh, dt)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, W_old, mesh, dt),
-						(W,),
-						(v,))
-			return jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, maxiter=20)
-		W = W + delta
+def time_step_RK2(W, mesh, dt, **kwargs):
+	F1 = residual(W, mesh, **kwargs)
+	W1 = W - dt/2 * F1
+	F2 = residual(W1, mesh, **kwargs)
+	W = W - dt * (F1 + F2)
+	return W
+
+@jax.jit(static_argnums=(1,))
+def time_step_RK4(W, mesh, dt, **kwargs):
+	F1 = residual(W, mesh, **kwargs)
+	W1 = W - dt/2 * F1
+	F2 = residual(W1, mesh, **kwargs)
+	W2 = W - dt/2 * F2
+	F3 = residual(W2, mesh, **kwargs)
+	W3 = W - dt * F3
+	F4 = residual(W3, mesh, **kwargs)
+
+	W = W - dt/6 * (F1 + 2*F2 + 2*F3 + F4)
+	return W
+
+
+@jax.jit(static_argnums=(1,))
+def times_step_Newton(W, mesh, dt, **kwargs):
+	# linear newton iterations = 1
+	Fval = dt * residual(W, mesh, **kwargs) 
+	# Implicit form of the residual, solving Jv = v + dt * Jv = -Fval
+	def Jv(v):
+		_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
+					(W,),
+					(v,))
+		return v + dt * jvp
+	
+	# no preconditioner, just solve the linear system with gmres
+	delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, maxiter=20)
+	W = W + delta
+	return W
+
+@jax.jit(static_argnums=(1,))
+def SDIKR2(W, mesh, dt, **kwargs):
+	x = 1 - 1/jnp.sqrt(2) # singly diagonally implicit RK
+
+	# first step
+	W1 = times_step_Newton(W, mesh, dt * x, **kwargs)
+	F1 = residual(W1, mesh, **kwargs)
+
+	# second step
+	Fval = W1 - W + dt * (x * residual(W1, mesh, **kwargs) + (1-2 * x) * F1)
+	def Jv(v):
+		_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
+					(W1,),
+					(v,))
+		return v + dt * x * jvp
+	
+	# no preconditioner, just solve the linear system with gmres
+	delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, maxiter=20)
+	W2 = W1 + delta
+	F2 = residual(W2, mesh, **kwargs)
+
+	W = W - 0.5 * dt * (F1 + F2) 
 	return W
 
 
@@ -236,29 +246,28 @@ if __name__ == "__main__":
 
 	# Time loop
 	t_final = 0.2 #/ jnp.mean(Primitives[...,1]) # to get real time
-	CFL = 0.3
+	CFL = 15
 	dt = get_dt(W, mesh, CFL = CFL)
 	N_t = int(t_final / dt) + 1
 
 	start_time = time.time()
 
-	E = []
-	Enstrophy = []
+	# E = []
+	# Enstrophy = []
 	t = 0
 	n = 0
-	for n in range(10000):
-		# dt = get_dt(W, mesh, CFL = CFL)
-
-		W, vorticity = time_step(W, mesh, dt, alpha = 0.1)
-		# W = times_step_Newton(W, mesh, dt)
+	for n in range(1000):
+		# W = time_step_RK2(W, mesh, dt, alpha = 1.)
+		# W = times_step_Newton(W, mesh, dt, alpha = 1.)
+		W = SDIKR2(W, mesh, dt, alpha = 1.)
 		if n % 100 == 0:
 			# print(f'time: {t:.4f} / {t_final:.3f} seconds')
 			print(f'It : {n} / {N_t}')
-		if n % 1000 == 0:
-			Prim = Euler_helper.getPrimitive(W)
-			energy = 0.5 * jnp.sum((Prim[...,1]**2 + Prim[...,2]**2) * mesh.area)
-			E.append(energy)
-			Enstrophy.append(jnp.sum(vorticity**2* mesh.area) )
+		# if n % 1000 == 0:
+		# 	Prim = Euler_helper.getPrimitive(W)
+		# 	energy = 0.5 * jnp.sum((Prim[...,1]**2 + Prim[...,2]**2) * mesh.area)
+		# 	E.append(energy)
+		# 	Enstrophy.append(jnp.sum(vorticity**2* mesh.area) )
 
 	print(f'Simulation time: {time.time() - start_time} seconds')
 
@@ -270,32 +279,5 @@ if __name__ == "__main__":
 	mesh.plot_solution(Primitives[...,3], labels = r'$P$')
 
 	# vorticity
+	vorticity = Euler_helper.get_vorticity_from_field(W, mesh)
 	mesh.plot_solution(vorticity, labels = r'$\omega$')
-
-	import matplotlib.pyplot as plt
-	size = 14
-	params = {
-		'text.usetex': True,
-		'font.family': 'serif',
-		'font.serif': 'cm',  # Computer Modern font
-		'legend.fontsize':size,
-		'axes.labelsize' : size,
-		'axes.titlesize' : size +2,
-		'xtick.labelsize' : size+1,
-		'ytick.labelsize' : size+1
-	}
-	plt.rcParams.update(params)
-
-	E = jnp.array(E)
-	fig, ax = plt.subplots()
-	ax.plot(jnp.arange(E.shape[0]) * 1000 * dt, E)
-	ax.grid()
-	ax.set_xlabel(r't')
-	ax.set_ylabel(r'$E_k$')
-
-	Enstrophy = jnp.array(Enstrophy)
-	fig, ax = plt.subplots()
-	ax.plot(jnp.arange(Enstrophy.shape[0]) * 1000 * dt, Enstrophy/2)
-	ax.grid()
-	ax.set_xlabel(r't')
-	ax.set_ylabel(r'$\xi$')
