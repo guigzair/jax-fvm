@@ -29,13 +29,16 @@ class Forward_Step:
 
 
 class TestDipoleVortex():
-    def build(self, h = 1e-3, L = 1.):
+    def __init__(self, maxV = 8e-5, L = 1.0):
+        self.h = maxV
+        self.L = L
+    def build(self):
         mesh = Mesh()
-        Lx = L / 2
-        Ly = L 
+        Lx = self.L / 2
+        Ly = self.L
 
-        N_maille_x = int(np.floor(Lx * np.sqrt(1/h)))
-        N_maille_y = int(np.floor(Ly * np.sqrt(1/h)))
+        N_maille_x = int(np.floor(Lx * np.sqrt(1/self.h)))
+        N_maille_y = int(np.floor(Ly * np.sqrt(1/self.h)))
         # N_maille = int(np.floor(L * np.sqrt(1/h)))
         boundaries = np.array([[x, 0] for x in np.linspace(0,Lx,N_maille_x)][:-1])
         markers  = [1] * (N_maille_x - 1)
@@ -50,7 +53,7 @@ class TestDipoleVortex():
         info.set_points(boundaries)
         info.set_facets(mesh.round_trip_connect(0, len(boundaries)-1), facet_markers=markers)
 
-        mesh.mesh_generator(info = info, maxV=h)
+        mesh.mesh_generator(info = info, maxV=self.h)
 
         return mesh
     

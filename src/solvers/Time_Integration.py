@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 
@@ -70,3 +72,4 @@ def SDIRK2(W, dt, mesh, residual, **kwargs):
 
 	W = W - 0.5 * dt * (F1 + F2) 
 	return W
+

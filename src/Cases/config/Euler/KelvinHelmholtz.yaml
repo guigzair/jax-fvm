@@ -1,0 +1,22 @@
+name: kelvin_helmholtz
+mesh:
+  type: None 
+  maxV: 1.0e-4
+  marker_boundary: 2
+  bounds: [0., 1., 0., 1.]
+kwargs:
+  gamma: 1.4
+  mu: 1.716e-4
+  R: 287
+  k: 0.30780
+  flag_NS: False
+  alpha: 1.
+initial_condition:
+  type: kelvin_helmholtz
+  params:
+    sigma: 0.1
+    alpha: 0.1
+time:
+  cfl: 0.4
+  t_end: 1.5
+  scheme: rk2

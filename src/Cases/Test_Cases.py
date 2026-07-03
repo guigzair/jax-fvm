@@ -201,11 +201,7 @@ class TestDipoleVortex2():
         Primitives = Primitives.at[...,1].set(u)
         Primitives = Primitives.at[...,2].set(v )
         Primitives = Primitives.at[...,3].set(p )
-
-
-        # BCs
-        mesh.inlet_subsonic = jnp.array([self.rho_0, 0., 0.0, p_0])  # rho, u, v, P
-        return Primitives, mesh
+        return Primitives
 
 class TestMovingVortex():
     def __init__(self, R = 0.005, beta = 1/50, mach = 0.05):

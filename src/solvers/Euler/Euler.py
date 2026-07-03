@@ -345,24 +345,9 @@ def residual(W, mesh, **kwargs):
 
 
 if __name__ == "__main__":
-	# mesh = Mesh_cases.TestDipoleVortex().build(h = 5e-5, L = 1.)
-	# Primitives, mesh = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
-
-	# mesh = Mesh_cases.Forward_Step().build(h = 2e-5)
-	# Primitives = Test_Cases.ForwardFacingStep().build(mesh)
-
-	# mesh = Mesh()
-	# mesh.mesh_generator(maxV = 5e-5, marker_boundary=2, x_min=0., x_max = 0.5, y_min = 0., y_max = 1.)
-	# Primitives, _ = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
-	# Primitives = Test_Cases.advected_sinus().build(mesh, u = 1, v = 1)
-
-	# mesh = Mesh_cases.UniformMesh(Nx=400, Ny=400, Lx=1.0, Ly=1.0).build()
-	# Primitives = Test_Cases.KevinHelmotzInstability(sigma =  0.1, alpha = 0.1).build(mesh)
-	# mesh = Mesh()
-	# mesh.mesh_generator(maxV=8e-5, marker_boundary=2, x_min=-1.5, x_max=1.5, y_min=-1.5, y_max=1.5)
-	# Primitives = Test_Cases.CorotatingVortices().build(mesh)
-
-	cfg_path = "../../Cases/config/corotating_merge.yaml"
+	# cfg_path = "../../Cases/config/corotating_merge.yaml"
+	# cfg_path = "../../Cases/config/KelvinHelmholtz.yaml"
+	cfg_path = "../../Cases/config/DipoleVortex.yaml"
 	case = Case.build(cfg_path, MeshClass=Mesh)
 
 	kwargs = case.config.kwargs
@@ -375,7 +360,7 @@ if __name__ == "__main__":
 
 	start_time = time.time()
 
-	T_interval_snapshots = 2000
+	T_interval_snapshots = 100
 	Snapshots = jnp.zeros((int(N_t/T_interval_snapshots), *W.shape))
 	for n in range(N_t):
 		W = TimeIntegration.time_step_RK2(W, dt, case.mesh, residual, **kwargs)
@@ -427,4 +412,4 @@ if __name__ == "__main__":
 	ax.grid()
 
 	# vorticity_snap = jax.lax.map(lambda x: helper.get_vorticity_from_field(x, case.mesh), Snapshots)
-	# case.mesh.animate_field(vorticity_snap[::4], path = "vorticity.gif", interval = 200)
+	# case.mesh.animate_field(vorticity_snap[::2], path = "vorticity.gif", interval = 200)

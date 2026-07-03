@@ -12,11 +12,6 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 SRC_DIR = Path(__file__).resolve().parent
 
-# import residual from Euler and NS solvers
-# import jax_fvm.src.solvers.Euler.Euler as Euler
-# import jax_fvm.src.solvers.compressible_NS.solver as NS
-
-
 # ---- registry: string name -> IC class ----
 IC_REGISTRY = {"corotating_merge": Test_Cases.CorotatingVortices,
                "dipole_vortex": Test_Cases.TestDipoleVortex2,
@@ -45,6 +40,7 @@ class MeshConfig:
     marker_boundary: int = 1
     bounds: list[float] = field(default_factory=list)
     min_angle: float = 30.0
+    params: dict = field(default_factory=dict)
 
 @dataclass
 class ICConfig:
@@ -56,6 +52,17 @@ class TimeConfig:
     cfl: float = 0.4
     t_end: float = 1.0
     scheme: str = "rk3"
+
+# ---- registry: string name -> solver builder ----
+def _build_euler(physics, time, mesh):
+    from jax_fvm.src.solvers.Euler.Euler import EulerSolver   # match your real path
+    return EulerSolver(mesh=mesh, gamma=physics.gamma, **time.integrator_kwargs())
+
+def _build_ns(physics, time, mesh):
+    from jax_fvm.src.solvers.compressible_NS.solver import NSSolver
+    return NSSolver(mesh=mesh, gamma=physics.gamma,
+                    mu=physics.mu, Pr=physics.Pr, **time.integrator_kwargs())
+
 
 
 @dataclass
@@ -85,7 +92,7 @@ class Config:
 @dataclass
 class Case:
     config: Config
-    mesh: Any = Mesh()  # Mesh object
+    mesh: Any = None
     primitives: Any = None  # (N, 4) array from the IC's build()
 
     @classmethod
@@ -96,7 +103,7 @@ class Case:
             mesh = MeshClass()
             mesh.mesh_generator(maxV = cfg.mesh.maxV, marker_boundary = cfg.mesh.marker_boundary, bounds = cfg.mesh.bounds)
         else:
-            mesh = MESH_REGISTRY.get(cfg.mesh.type)(**cfg.mesh.info)
+            mesh = MESH_REGISTRY.get(cfg.mesh.type)(**cfg.mesh.params).build()
 
         ic = IC_REGISTRY.get(cfg.initial_condition.type)
         if not ic:
@@ -107,5 +114,8 @@ class Case:
         return cls(config=cfg, mesh=mesh, primitives=primitives)
     
 if __name__ == "__main__":
-    cfg_path = SRC_DIR / "Cases" / "config" / "corotating_merge.yaml"
+    # cfg_path = SRC_DIR / "Cases" / "config" / "corotating_merge.yaml"
+    # cfg_path = "../../Cases/config/KelvinHelmholtz.yaml"
+    cfg_path = "Cases/config/DipoleVortex.yaml"
+
     case = Case.build(cfg_path, MeshClass=Mesh)

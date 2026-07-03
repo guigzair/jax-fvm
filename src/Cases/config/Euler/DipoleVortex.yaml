@@ -1,0 +1,24 @@
+name: dipole_vortex
+mesh:
+  type: dipole_vortex 
+  params:
+    maxV: 8.e-05
+    L: 1.0
+kwargs:
+  gamma: 1.4
+  mu: 1.716e-4
+  R: 287
+  k: 0.30780
+  flag_NS: False
+  alpha: 0.1
+initial_condition:
+  type: dipole_vortex
+  params:
+    R: 0.1
+    omega: 300
+    mach: 0.01
+    rho_0: 1.0
+time:
+  cfl: 0.4
+  t_end: 0.2
+  scheme: rk2
