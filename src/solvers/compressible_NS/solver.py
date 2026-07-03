@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import jax
 jax.config.update("jax_debug_nans", True)
 import sys
-
+jax.config.update('jax_enable_x64', True)
 sys.path.append('../../../..')  
 from jax_fvm.src.mesh.mesh import Mesh 
 import jax_fvm.src.Cases.Test_Cases as Test_Cases
@@ -35,7 +35,7 @@ With jax.jit compilation = ~ 100x faster for large data
 ###########################################################################################################
 
 
-def getFlux_diffusive(grad_prim, Prim_L, Prim_R, mesh, **kwargs):
+def getFlux_diffusive2(grad_prim, Prim_L, Prim_R, mesh, **kwargs):
 	mu = kwargs.get('mu', 1.716e-4)
 	R = kwargs.get('R', 287)
 	k = kwargs.get('k', 0.0257)
@@ -46,6 +46,7 @@ def getFlux_diffusive(grad_prim, Prim_L, Prim_R, mesh, **kwargs):
 	temp_L = helper.get_temperature(Prim_L, R = R)
 	temp_R = helper.get_temperature(Prim_R, R = R)
 	grad_T = helper.getgradientLSQ(temp_L[...,None], temp_R[...,None], mesh)
+	print(f"grad_T shape: {grad_T.shape}")
 
 	tau = grad_prim[...,1:3,:] + jnp.transpose(grad_prim[...,1:3,:], (0,2,1))
 	tau = tau - 2/3 * jnp.einsum('ij,kl->ikl', div_u[...,None],jnp.eye(2))
@@ -81,6 +82,62 @@ def getFlux_diffusive(grad_prim, Prim_L, Prim_R, mesh, **kwargs):
 	return Flux
 
 
+
+def getFlux_diffusive(grad, Prim_L, Prim_R, mesh, **kwargs):
+	mu = kwargs.get('mu', 1e-5)
+	k  = kwargs.get('k',  1e-5)
+	R  = kwargs.get('R',  287.)
+
+	# Face-averaged primitive variables
+	Prim_face = 0.5 * (Prim_L + Prim_R)  # (N_cells, 3, 4)
+	rho_f = Prim_face[..., 0]
+	u_f   = Prim_face[..., 1]
+	v_f   = Prim_face[..., 2]
+	P_f   = Prim_face[..., 3]
+
+	# Face-averaged gradients: average of left cell and right (neighbor) cell gradients
+	# grad: (N_cells, N_vars, 2) ; grad[mesh.neighbors]: (N_cells, 3, N_vars, 2)
+	grad_face = 0.5 * (grad[:, None, :, :] + grad[mesh.neighbors])  # (N_cells, 3, N_vars, 2)
+
+	du_dx   = grad_face[..., 1, 0]  # (N_cells, 3)
+	du_dy   = grad_face[..., 1, 1]
+	dv_dx   = grad_face[..., 2, 0]
+	dv_dy   = grad_face[..., 2, 1]
+	drho_dx = grad_face[..., 0, 0]
+	drho_dy = grad_face[..., 0, 1]
+	dP_dx   = grad_face[..., 3, 0]
+	dP_dy   = grad_face[..., 3, 1]
+
+	# Viscous stress tensor (Newtonian fluid, Stokes hypothesis: zero bulk viscosity)
+	div_u  = du_dx + dv_dy
+	tau_xx = mu * (2 * du_dx - 2/3 * div_u)
+	tau_yy = mu * (2 * dv_dy - 2/3 * div_u)
+	tau_xy = mu * (du_dy + dv_dx)
+
+	# Temperature gradient via T = P / (rho * R)
+	dT_dx = (dP_dx * rho_f - P_f * drho_dx) / (rho_f**2 * R)
+	dT_dy = (dP_dy * rho_f - P_f * drho_dy) / (rho_f**2 * R)
+
+	# Heat flux (Fourier's law): q = -k * grad(T)
+	q_x = -k * dT_dx
+	q_y = -k * dT_dy
+
+	nx = mesh.normals[..., 0]  # (N_cells, 3)
+	ny = mesh.normals[..., 1]
+
+	# Diffusive flux projected onto face normal F_d · n for each conserved variable
+	f_rho   = jnp.zeros_like(rho_f)
+	f_mom_x = tau_xx * nx + tau_xy * ny
+	f_mom_y = tau_xy * nx + tau_yy * ny
+	f_E     = (u_f * tau_xx + v_f * tau_xy - q_x) * nx + (u_f * tau_xy + v_f * tau_yy - q_y) * ny
+
+	Flux_d = jnp.stack([f_rho, f_mom_x, f_mom_y, f_E], axis=-1)  # (N_cells, 3, 4)
+
+	# Integrate over face surfaces and sum over all faces
+	# Flux_d = mesh.surface[mesh.face_connectivity][..., None] * Flux_d
+	return Flux_d
+
+
 ###########################################################################################################
 ############################           Time integration                 ###################################
 ###########################################################################################################
@@ -94,89 +151,26 @@ def residual(W, mesh, **kwargs):
 	# 2nd order - MUSCL with least-square gradient
 	W_R = helper.BC_state(W_R, W_L, mesh, **kwargs)
 
-	W_L = helper.getPrimitive(W_L, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
-	W_R = helper.getPrimitive(W_R, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
-	grad = helper.getgradientLSQ(W_L, W_R, mesh)
-	W_L, W_R = Euler.MUSCL(W_L, W_R, grad, mesh)
-	W_L = helper.getConserved(W_L, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
-	W_R = helper.getConserved(W_R, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
-	Flux = Euler.getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs) 
+	Prim_L = helper.getPrimitive(W_L, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
+	Prim_R = helper.getPrimitive(W_R, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
+	grad = helper.getgradientLSQ(Prim_L, Prim_R, mesh)
+	Prim_L, Prim_R = Euler.MUSCL(Prim_L, Prim_R, grad, mesh)
+	W_L = helper.getConserved(Prim_L, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
+	W_R = helper.getConserved(Prim_R, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
+
+	# compute convective flux using Tadmor's central scheme
+	Flux_convective = Euler.getFlux_Tadmor(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs) 
 	
 	# compute diffusive flux based on primitive variable gradients
-	Flux_diffusive = getFlux_diffusive(grad, W_L, W_R, mesh, **kwargs)
+	Flux_diffusive = getFlux_diffusive(grad, Prim_L, Prim_R, mesh, **kwargs)
 
-	R = 1/ mesh.area[...,None] * (Flux - Flux_diffusive) 
+	Flux = Flux_convective - Flux_diffusive
+	Flux = mesh.surface[mesh.face_connectivity][...,None] * Flux
+	Flux = jnp.sum(Flux, axis = -2)
+
+	R = 1/ mesh.area[...,None] * Flux
 	return R
 
-@jax.jit(static_argnums=(1,))
-def time_step_RK2(W, mesh, dt, **kwargs):
-	F1 = residual(W, mesh, **kwargs)
-	W1 = W - dt/2 * F1
-	F2 = residual(W1, mesh, **kwargs)
-	W = W - dt * F2
-	return W
-
-@jax.jit(static_argnums=(1,))
-def time_step_RK4(W, mesh, dt, **kwargs):
-	F1 = residual(W, mesh, **kwargs)
-	W1 = W - dt/2 * F1
-	F2 = residual(W1, mesh, **kwargs)
-	W2 = W - dt/2 * F2
-	F3 = residual(W2, mesh, **kwargs)
-	W3 = W - dt * F3
-	F4 = residual(W3, mesh, **kwargs)
-
-	W = W - dt/6 * (F1 + 2*F2 + 2*F3 + F4)
-	return W
-
-@jax.jit(static_argnums=(1,))
-def time_step_Newton(W, mesh, dt, **kwargs):
-	W_old = W
-	for _ in range(3):
-		Fval = W - W_old + dt * residual(W, mesh, **kwargs)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
-						(W,),
-						(v,))
-			return v + dt * jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, tol=5e-3, maxiter=2, restart = 25)
-		W = W + delta * 0.6  # under-relaxation to ensure convergence
-	return W
-
-@jax.jit(static_argnums=(1,))
-def SDIRK2(W, mesh, dt, **kwargs):
-	x = 1 - 1/jnp.sqrt(2) # singly diagonally implicit RK
-	n_newton = 2
-	maxiter = 2
-	tol= 1e-2
-	# first step
-	W1 = W
-	for _ in range(n_newton):
-		Fval = W1 - W + dt * residual(W1, mesh, **kwargs)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
-						(W1,),
-						(v,))
-			return v + dt * jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, tol=tol, maxiter= maxiter, restart = 25)
-		W1 = W1 + delta * 0.6  # under-relaxation to ensure convergence
-	F1 = residual(W1, mesh, **kwargs)
-
-	# second step
-	W2 = W1
-	for _ in range(n_newton):
-		Fval = W2 - W + dt * (x * residual(W2, mesh, **kwargs) + (1-2 * x) * F1)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
-						(W2,),
-						(v,))
-			return v + dt * x * jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, tol=tol, maxiter=maxiter, restart = 25)
-		W2 = W2 + delta * 0.6  # under-relaxation to ensure convergence
-	F2 = residual(W2, mesh, **kwargs)
-
-	W = W - 0.5 * dt * (F1 + F2) 
-	return W
 
 
 if __name__ == "__main__":
@@ -187,15 +181,19 @@ if __name__ == "__main__":
 	C_v = R / (gamma - 1)
 	C_p = C_v * gamma
 	k = 5/2 * mu * C_v
-	kwargs = {'gamma': gamma, 'mu': mu, 'R': R, 'k': k, 'flag_NS': True, 'alpha': 0.1}
+	kwargs = {'gamma': gamma, 'mu': mu, 'R': R, 'k': k, 'flag_NS': True, 'alpha': 1.}
 
 	# little test case: Forward facing step
-	mesh = Mesh_cases.TestDipoleVortex().build(h = 9e-6, L = 1.)
-	Primitives, mesh = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
+	# mesh = Mesh_cases.TestDipoleVortex().build(h = 5e-5, L = 1.)
+	# Primitives, mesh = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
+	mesh = Mesh()
+	mesh.mesh_generator(maxV=8e-5, marker_boundary=2, x_min=-1.5, x_max=1.5, y_min=-1.5, y_max=1.5)
+	Primitives = Test_Cases.CorotatingVortices().build(mesh)
+
 	W = helper.getConserved(Primitives)
 
 	# Time loop
-	t_final = 0.3 
+	t_final = 35
 	CFL = 0.4
 	dt = helper.get_dt(W, mesh, CFL = CFL)
 	dt_viscous = helper.get_dt_viscous(mesh, CFL = CFL, nu = mu / jnp.mean(Primitives[...,0]))
@@ -205,7 +203,7 @@ if __name__ == "__main__":
 
 	start_time = time.time()
 
-	T_interval_snapshots = 5000
+	T_interval_snapshots = 2000
 	Snapshots = jnp.zeros((int(N_t/T_interval_snapshots), *W.shape))
 	for n in range(N_t):
 		W = time_step_RK2(W, mesh, dt, **kwargs)
@@ -219,12 +217,12 @@ if __name__ == "__main__":
 
 	# Plot solution
 	Primitives = helper.getPrimitive(W)
-	# mesh.plot_solution(Primitives[...,0], labels = r'$\rho$')
-	# mesh.plot_solution(Primitives[...,3], labels = r'$P$')
+	mesh.plot_solution(Primitives[...,0], labels = r'$\rho$')
+	mesh.plot_solution(Primitives[...,3], labels = r'$P$')
 
 	# vorticity
 	vorticity = helper.get_vorticity_from_field(W, mesh, **kwargs)
-	mesh.plot_contour_solution(vorticity, labels = r'$\omega$')
+	# mesh.plot_contour_solution(vorticity, labels = r'$\omega$')
 	mesh.plot_solution(vorticity, labels = r'$\omega$')
 
 	# entropy plot

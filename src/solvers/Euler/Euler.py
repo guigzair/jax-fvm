@@ -3,12 +3,11 @@ import jax
 import sys
 
 sys.path.append('../../../..')  
-from jax_fvm.src.mesh.mesh import Mesh # pyright: ignore[reportMissingImports]
-import jax_fvm.src.mesh.plot as plot # pyright: ignore[reportMissingImports]
-import jax_fvm.src.Cases.Test_Cases as Test_Cases # pyright: ignore[reportMissingImports]
-import jax_fvm.src.mesh.Mesh_cases as Mesh_cases # pyright: ignore[reportMissingImports]
+from jax_fvm.src.config import Case
+from jax_fvm.src.mesh.mesh import Mesh 
+import jax_fvm.src.solvers.Time_Integration as TimeIntegration
 import time
-import jax_fvm.src.solvers.helper as helper # pyright: ignore[reportMissingImports]
+import jax_fvm.src.solvers.helper as helper 
 import matplotlib.pyplot as plt
 # jax.config.update('jax_enable_x64', True)
 jax.config.update("jax_debug_nans", True)
@@ -25,10 +24,7 @@ params = {
 }
 plt.rcParams.update(params)
 
-"""
-Finite Volume Method for 2D Euler equations
-With jax.jit compilation = ~ 100x faster for large data
-"""
+
 ###########################################################################################################
 ##############################                Solver                 ######################################
 ###########################################################################################################
@@ -311,9 +307,9 @@ def getFlux_Tadmor(W_L, W_R, normals, surfaces, **kwargs):
 	Flux = Flux - scaling * Rusanov(W_L, W_R, normals, **kwargs)
 	# Flux = Flux - alpha * Roe(W_L, W_R, normals, **kwargs) 
 
-	Flux = surfaces[...,None] * Flux
+	# Flux = surfaces[...,None] * Flux
 
-	Flux = jnp.sum(Flux, axis = -2)
+	# Flux = jnp.sum(Flux, axis = -2)
 	return Flux
 
 
@@ -338,78 +334,14 @@ def residual(W, mesh, **kwargs):
 	W_R = helper.getConserved(W_R, gamma = kwargs.get('gamma', 1.4), M = kwargs.get('M', 1.))
 
 	Flux = getFlux_Tadmor(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs) 
+	
+	Flux = mesh.surface[mesh.face_connectivity][...,None] * Flux
+	Flux = jnp.sum(Flux, axis = -2)
 	return Flux / mesh.area[...,None] 
 
 
-@jax.jit(static_argnums=(1,))
-def time_step_RK2(W, mesh, dt, **kwargs):
-	F1 = residual(W, mesh, **kwargs)
-	W1 = W - dt * F1
-	F2 = residual(W1, mesh, **kwargs)
-	W = W - dt * F2
-	W = 0.5 * (W + W1)  # Heun's method
-	return W
-
-@jax.jit(static_argnums=(1,))
-def time_step_RK4(W, mesh, dt, **kwargs):
-	F1 = residual(W, mesh, **kwargs)
-	W1 = W - dt/2 * F1
-	F2 = residual(W1, mesh, **kwargs)
-	W2 = W - dt/2 * F2
-	F3 = residual(W2, mesh, **kwargs)
-	W3 = W - dt * F3
-	F4 = residual(W3, mesh, **kwargs)
-
-	W = W - dt/6 * (F1 + 2*F2 + 2*F3 + F4)
-	return W
-
-@jax.jit(static_argnums=(1,))
-def time_step_Newton(W, mesh, dt, **kwargs):
-	W_old = W
-	for _ in range(3):
-		Fval = W - W_old + dt * residual(W, mesh, **kwargs)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
-						(W,),
-						(v,))
-			return v + dt * jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, tol=5e-3, maxiter=2, restart = 25)
-		W = W + delta * 0.6  # under-relaxation to ensure convergence
-	return W
 
 
-@jax.jit(static_argnums=(1,))
-def SDIRK2(W, mesh, dt, **kwargs):
-	x = 1 - 1/jnp.sqrt(2) # singly diagonally implicit RK
-	n_newton = 4
-	# first step
-	W1 = W
-	for _ in range(n_newton):
-		Fval = W1 - W + dt * residual(W1, mesh, **kwargs)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
-						(W1,),
-						(v,))
-			return v + dt * jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, tol=5e-3, maxiter=3, restart = 25)
-		W1 = W1 + delta * 0.6  # under-relaxation to ensure convergence
-	F1 = residual(W1, mesh, **kwargs)
-
-	# second step
-	W2 = W1
-	for _ in range(n_newton):
-		Fval = W2 - W + dt * (x * residual(W2, mesh, **kwargs) + (1-2 * x) * F1)
-		def Jv(v):
-			_, jvp = jax.jvp(lambda x: residual(x, mesh, **kwargs),
-						(W2,),
-						(v,))
-			return v + dt * x * jvp
-		delta, _ = jax.scipy.sparse.linalg.gmres(Jv, -Fval, tol=5e-3, maxiter=3, restart = 25)
-		W2 = W2 + delta * 0.6  # under-relaxation to ensure convergence
-	F2 = residual(W2, mesh, **kwargs)
-
-	W = W - 0.5 * dt * (F1 + F2) 
-	return W
 
 
 if __name__ == "__main__":
@@ -424,31 +356,29 @@ if __name__ == "__main__":
 	# Primitives, _ = Test_Cases.TestDipoleVortex2(R = 0.1, omega = 300, mach = 0.01).build(mesh)
 	# Primitives = Test_Cases.advected_sinus().build(mesh, u = 1, v = 1)
 
-	mesh = Mesh_cases.UniformMesh(Nx=150, Ny=150, Lx=1.0, Ly=1.0).build()
-	Primitives = Test_Cases.KevinHelmotzInstability(sigma =  0.1, alpha = 0.1).build(mesh)
+	# mesh = Mesh_cases.UniformMesh(Nx=400, Ny=400, Lx=1.0, Ly=1.0).build()
+	# Primitives = Test_Cases.KevinHelmotzInstability(sigma =  0.1, alpha = 0.1).build(mesh)
+	# mesh = Mesh()
+	# mesh.mesh_generator(maxV=8e-5, marker_boundary=2, x_min=-1.5, x_max=1.5, y_min=-1.5, y_max=1.5)
+	# Primitives = Test_Cases.CorotatingVortices().build(mesh)
 
-	# Prim_ref = jnp.array([1., 1., 1., 1 / 0.01**2])
-	# Primitives = Primitives / Prim_ref
+	cfg_path = "../../Cases/config/corotating_merge.yaml"
+	case = Case.build(cfg_path, MeshClass=Mesh)
 
-	kwargs = {'gamma': 1.4, 'alpha': 1., 'M': 1.}
+	kwargs = case.config.kwargs
 
-	W = helper.getConserved(Primitives, gamma = kwargs['gamma'], M = kwargs['M'])
-	mesh.plot_mesh()
+	W = helper.getConserved(case.primitives, gamma = kwargs['gamma'], M = kwargs.get('M', 1.))
 
-	# Time loop
-	t_final = 1.5
-	CFL = 0.4
-	dt = helper.get_dt(W, mesh, CFL = CFL)
+	t_final = case.config.time.t_end
+	dt = helper.get_dt(W, case.mesh, CFL = case.config.time.cfl)
 	N_t = int(t_final / dt) + 1
 
 	start_time = time.time()
 
-	T_interval_snapshots = 100
+	T_interval_snapshots = 2000
 	Snapshots = jnp.zeros((int(N_t/T_interval_snapshots), *W.shape))
 	for n in range(N_t):
-		W = time_step_RK2(W, mesh, dt, **kwargs)
-		# W = time_step_Newton(W, mesh, dt, **kwargs)
-		# W = SDIRK2(W, mesh, dt, alpha = 0.1)
+		W = TimeIntegration.time_step_RK2(W, dt, case.mesh, residual, **kwargs)
 		if n % 1000 == 0:
 			print(f'It : {n} / {N_t}')
 			if jnp.isnan(W).any():
@@ -459,21 +389,21 @@ if __name__ == "__main__":
 
 	print(f'Simulation time: {time.time() - start_time} seconds')
 	# Plot solution
-	Primitives = helper.getPrimitive(W, gamma = kwargs['gamma'], M = kwargs['M'])
-	mesh.plot_solution(Primitives[...,0], labels = r'$\rho$')
-	mesh.plot_solution(Primitives[...,1], labels = r'$u$')
+	Primitives = helper.getPrimitive(W, gamma = kwargs['gamma'], M = kwargs.get('M', 1.))
+	case.mesh.plot_solution(Primitives[...,0], labels = r'$\rho$')
+	case.mesh.plot_solution(Primitives[...,1], labels = r'$u$')
 
 	# vorticity
-	vorticity = helper.get_vorticity_from_field(W, mesh)
-	mesh.plot_solution(vorticity, labels = r'$\omega$')
+	vorticity = helper.get_vorticity_from_field(W, case.mesh)
+	case.mesh.plot_solution(vorticity, labels = r'$\omega$')
 
 	# entropy plot
 	Entropy_rec = jnp.zeros(Snapshots.shape[0])
 	for i in range(Snapshots.shape[0]):
-		Entropy_rec = Entropy_rec.at[i].set(helper.get_total_entropy(Snapshots[i], mesh))
+		Entropy_rec = Entropy_rec.at[i].set(helper.get_total_entropy(Snapshots[i], case.mesh))
 	plt.plot(Entropy_rec)
 
-	Total_entropy = jax.lax.map(lambda x: helper.get_total_entropy(x, mesh), Snapshots)
+	Total_entropy = jax.lax.map(lambda x: helper.get_total_entropy(x, case.mesh), Snapshots)
 	fig, ax = plt.subplots()
 	ax.plot(jnp.arange(Snapshots.shape[0]) * T_interval_snapshots * dt, Total_entropy)
 	ax.set_xlabel(r't')
@@ -481,7 +411,7 @@ if __name__ == "__main__":
 	ax.grid()
 
 	# enstrophy plot
-	Total_enstrophy = jax.lax.map(lambda x: helper.get_total_enstrophy(x, mesh), Snapshots)
+	Total_enstrophy = jax.lax.map(lambda x: helper.get_total_enstrophy(x, case.mesh), Snapshots)
 	fig, ax = plt.subplots()
 	ax.plot(jnp.arange(Snapshots.shape[0]) * T_interval_snapshots * dt, Total_enstrophy)
 	ax.set_xlabel(r't')
@@ -489,9 +419,12 @@ if __name__ == "__main__":
 	ax.grid()
 
 	# energy plot
-	Total_energy = jax.lax.map(lambda x: helper.get_total_kinetic_energy(x, mesh), Snapshots)
+	Total_energy = jax.lax.map(lambda x: helper.get_total_kinetic_energy(x, case.mesh), Snapshots)
 	fig, ax = plt.subplots()
 	ax.plot(jnp.arange(Snapshots.shape[0]) * T_interval_snapshots * dt, Total_energy)
 	ax.set_xlabel(r't')
 	ax.set_ylabel(r'$E$')
 	ax.grid()
+
+	# vorticity_snap = jax.lax.map(lambda x: helper.get_vorticity_from_field(x, case.mesh), Snapshots)
+	# case.mesh.animate_field(vorticity_snap[::4], path = "vorticity.gif", interval = 200)

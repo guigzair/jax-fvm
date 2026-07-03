@@ -191,16 +191,6 @@ def BC_slipwall(W_R, W_L, mesh, bc_type = 2, value = jnp.array([0., 0., 0., 0.])
 	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
 	return W_R	
 
-def BC_slipwall_entropic(W_R, W_L, mesh, bc_type = 2, value = jnp.array([0., 0., 0., 0.])):
-	Eta_L = getEntropyVariables(W_L)
-
-	vn = (Eta_L[...,1] - value[1]) * mesh.normals[...,0] + (Eta_L[...,2] - value[2]) * mesh.normals[...,1]
-	vb = (Eta_L[...,1:3] - value[1:3]) - 2 * vn[...,None] * mesh.normals
-	Eta_b = Eta_L.at[...,1:3].set(vb + value[1:3])
-	W_b = getConserved_from_Entropy(Eta_b)
-	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
-	return W_R	
-
 def BC_noslip_wall(W_R, W_L, mesh, bc_type = 2):
 	Prim_L = getPrimitive(W_L)
 	vn = (Prim_L[...,1] * mesh.normals[...,0] + Prim_L[...,2] * mesh.normals[...,1])

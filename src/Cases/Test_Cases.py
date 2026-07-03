@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import numpy as np
 import meshpy.triangle as triangle
-
+from dataclasses import dataclass
 
 # This file is used to implement all test cases present in lax paper
 # SOLUTION OF TWO-DIMENSIONAL RIEMANN PROBLEMS OF GAS DYNAMICS BY POSITIVE SCHEMES, Lax, Liu, 1998
@@ -164,7 +164,6 @@ class TestDipoleVortex():
         mesh.inlet_subsonic = jnp.array([rho_inf, 0.01 * U_inf, 0.0, P_inf])  # rho, u, v, P
         return Primitives, mesh
 
-
 class TestDipoleVortex2():
     def __init__(self, R = 0.05, omega = 300, mach = 0.01, rho_0 = 1.0):
         self.R = R
@@ -320,6 +319,118 @@ class KevinHelmotzInstability():
         Primitives = Primitives.at[...,3].set(p)
         return Primitives
 
+# class MergingPair():
+#     def __init__(self):
+#         self.mach = 0.01
+#         self.a = 1.0
+
+#     def build(self, mesh):
+#         r1 = jnp.array([-1.5, 0.])
+#         r2 = jnp.array([1.5, 0.])
+
+#         def velocity(x, y, centers=(r1, r2), Gamma=jnp.pi):
+#             u = jnp.zeros_like(x); v = jnp.zeros_like(x)
+#             for (xk, yk) in centers:
+#                 dx, dy = x - xk, y - yk
+#                 r2 = dx*dx + dy*dy
+#                 # u_theta / r, finite at r=0
+#                 f = (Gamma/(2*jnp.pi)) * (1 - jnp.exp(-r2/self.a**2)) / jnp.where(r2>0, r2, 1.0)
+#                 f = jnp.where(r2>0, f, Gamma/(2*jnp.pi*self.a**2))  # r->0 limit
+#                 u += -f*dy
+#                 v +=  f*dx
+#             return u, v
+        
+#         u, v = velocity(mesh.barycenter[:,0], mesh.barycenter[:,1])
+#         p_0 = 1 / (1.4 * self.mach**2) #U_0 ** 2 * self.rho_0 / (1.4 * self.mach**2)
+#         p = p_0 
+#         rho = self.rho_0 * (p / p_0)**(1/1.4)
+#         p = jnp.ones_like(u)
+#         Primitives = jnp.zeros((len(mesh.area), 4))
+#         Primitives = Primitives.at[...,0].set(rho)
+#         Primitives = Primitives.at[...,1].set(u)
+#         Primitives = Primitives.at[...,2].set(v)
+#         Primitives = Primitives.at[...,3].set(p)
+#         return Primitives
+
+
+class CorotatingVortices():
+    """
+    Two co-rotating Gaussian vortices (Josserand & Rossi 2007) as initial
+    conditions for the 2D compressible Euler equations.
+ 
+    Primitives layout matches the template: columns (rho, u, v, p).
+ 
+    Parameters
+    ----------
+    Gamma : circulation / strength of each vortex (beta).
+    r0    : Gaussian core radius.
+    D0    : separation between the two vortex centres.
+    center: (cx, cy) box centre the pair is placed symmetrically about.
+    gamma : ratio of specific heats (for the isentropic thermodynamics).
+    rho_inf, p_inf : uniform background state.
+    """
+ 
+    def __init__(self, Gamma=1., r0=0.18, D0=1.,
+                 center=(0., 0.), gamma=1.4, rho_inf=1., p_inf=1.):
+        self.Gamma = Gamma
+        self.r0 = r0
+        self.D0 = D0
+        self.center = center
+        self.gamma = gamma
+        self.rho_inf = rho_inf
+        self.p_inf = p_inf
+ 
+    def build(self, mesh):
+        N = len(mesh.area)
+        cx, cy = self.center
+        # two cores placed symmetrically about the centre, separation D0 along x
+        centres = ((cx - self.D0 / 2., cy),
+                   (cx + self.D0 / 2., cy))
+ 
+        def one_vortex_velocity(x, y, xc, yc):
+            dx = x - xc
+            dy = y - yc
+            s2 = dx * dx + dy * dy
+            s = jnp.sqrt(s2 + 1e-30)                       # regularised radius
+            # Lamb-Oseen azimuthal velocity for a Gaussian vorticity core
+            u_theta = self.Gamma / (2. * jnp.pi * s) * (1. - jnp.exp(-s2 / self.r0**2))
+            # counter-clockwise unit azimuthal direction: (-dy, dx)/s
+            return u_theta * (-dy / s), u_theta * (dx / s)
+ 
+        def one_vortex_dT(x, y, xc, yc):
+            dx = x - xc
+            dy = y - yc
+            s2 = dx * dx + dy * dy
+            g = self.gamma
+            beta = self.Gamma
+            # isentropic-vortex temperature dip -> cyclostrophic balance
+            return -(g - 1.) * beta**2 / (8. * g * jnp.pi**2) * jnp.exp(1. - s2 / self.r0**2)
+ 
+        def velocity_field(x, y):
+            g = self.gamma
+            R = self.p_inf / self.rho_inf          # gives T_inf = 1
+            T_inf = self.p_inf / (self.rho_inf * R)
+ 
+            u = jnp.zeros_like(x)
+            v = jnp.zeros_like(x)
+            T = T_inf * jnp.ones_like(x)
+            for (xc, yc) in centres:
+                du, dv = one_vortex_velocity(x, y, xc, yc)
+                u = u + du
+                v = v + dv
+                T = T + one_vortex_dT(x, y, xc, yc)
+ 
+            rho = self.rho_inf * (T / T_inf) ** (1. / (g - 1.))
+            p = (self.p_inf / self.rho_inf**g) * rho**g
+            return rho, u, v, p
+ 
+        Primitives = jnp.zeros((N, 4))
+        rho, u, v, p = velocity_field(mesh.barycenter[:, 0], mesh.barycenter[:, 1])
+        Primitives = Primitives.at[..., 0].set(rho)
+        Primitives = Primitives.at[..., 1].set(u)
+        Primitives = Primitives.at[..., 2].set(v)
+        Primitives = Primitives.at[..., 3].set(p)
+        return Primitives
 
 ##########################################################
 

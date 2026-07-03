@@ -6,7 +6,6 @@ import numpy as np
 sys.path.append('../../..')  
 import jax_fvm.src.mesh.plot as plot
 import jax
-from scipy.spatial import Delaunay
 
 import matplotlib.pyplot as plt
 size = 14
@@ -61,11 +60,11 @@ class Mesh:
         return result
 
     def mesh_generator(self, info = None, maxV = 5e-3, 
-                       x_min = 0., x_max = 1., y_min = 0., y_max = 1.,
-					    min_angle = 30, marker_boundary = 1):
+                       bounds = [-1.5, 1.5, -1.5, 1.5], min_angle = 30, marker_boundary = 1):
         # info is used to create the geometry before passing to create the mesh
         # In the case there is no info, it is only a periodic square
         if info == None:
+            x_min, x_max, y_min, y_max = bounds
             Lx = x_max - x_min
             Ly = y_max - y_min
             N_maille_x = 2 * int(np.floor(np.sqrt(1/maxV)) * Lx / Ly)
@@ -196,9 +195,9 @@ class Mesh:
 ################     Boundary conditions    #######################
 ###################################################################
     
-    def set_periodic_BC(self, tol=3e-7):
+    def set_periodic_BC(self, tol=1e-5):
         if self.points.dtype == jnp.float64:
-            tol = 1e-10
+            tol = 1e-09
         # Domain bounds
         x_min, x_max = self.points[:, 0].min(), self.points[:, 0].max()
         y_min, y_max = self.points[:, 1].min(), self.points[:, 1].max()
@@ -222,21 +221,18 @@ class Mesh:
                     is_bottom[:, None] * jnp.array([0., dy]) +
                     is_top[:, None] * jnp.array([0., -dy]))
 
-        opposite_points = self.points[self.faces[boundary_face_ids]] + shifts[:, None, :]
-
         # Distance matrices
+        face_centers = jnp.mean(self.points[self.faces[boundary_face_ids]], axis=1)  # (N_b, 2)
+        face_centers_shifted = face_centers + shifts  # (N_b, 2)
         dist = jnp.linalg.norm(
-            self.points[self.faces[boundary_face_ids]][:, None, :, :] - opposite_points[None, :, :, :],
+            face_centers[:, None, :] - face_centers_shifted[None, :, :],
             axis=-1
-        )  # (N_b, N_b, 2)
-
-        dist_shifted = jnp.linalg.norm(
-            self.points[self.faces[boundary_face_ids]][:, None, :, :] - jnp.roll(opposite_points[None, :, :, :], 1, axis=-2),
-            axis=-1
-        )
-
-        # One point must match
-        id_f_opposite = jnp.where((jnp.sum(dist < tol, axis = -1) == 2) | (jnp.sum(dist_shifted < tol, axis = -1) == 2))[1]
+        )  # (N_b, N_b)
+        # id_f_opposite = jnp.where(dist < tol)[1]
+        if len(boundary_face_ids) > 0:
+            id_f_opposite = jnp.argmin(dist, axis=1)
+        else : 
+            id_f_opposite = jnp.array([], dtype=int)
 
         # update neighbors
         for i, boundary_face_id in enumerate(boundary_face_ids):
@@ -287,10 +283,50 @@ class Mesh:
         ax.set_xlabel(r'$x$')
         ax.set_ylabel(labels)
 
+###################################################################
+##################     Helper functions     #######################
+###################################################################
+
+    def index_nodes_to_faces(self):
+        _, id_tris_to_faces, id_faces_to_tris = jnp.unique(self.face_connectivity.reshape(-1), return_index = True, return_inverse=True)
+        return id_tris_to_faces, id_faces_to_tris
+    
+    def map_faces_to_left_right_triangles(self):
+        """
+        For each unique face interface, return the left and right triangle indices.
+        Right is read from mesh.neighbors. Periodic face pairs (f, f_opp) are
+        deduplicated via face_connectivity_opposite — each interface appears once.
+
+        Returns:
+            left_tri:  (N_interfaces,) int array
+            right_tri: (N_interfaces,) int array
+        """
+        N_tris = self.face_connectivity.shape[0]
+        N_faces = self.faces.shape[0]
+
+        face_flat = np.array(self.face_connectivity).reshape(-1)  # (3*N_tris,)
+        tri_flat = np.repeat(np.arange(N_tris), 3)
+        neighbor_flat = np.array(self.neighbors).reshape(-1)       # (3*N_tris,)
+
+        order = np.argsort(face_flat, kind='stable')
+        face_sorted = face_flat[order]
+        tri_sorted = tri_flat[order]
+        neighbor_sorted = neighbor_flat[order]
+
+        is_first = np.concatenate([[True], face_sorted[1:] != face_sorted[:-1]])
+
+        left_tri = np.full(N_faces, -1, dtype=np.int32)
+        right_tri = np.full(N_faces, -1, dtype=np.int32)
+        left_tri[face_sorted[is_first]] = tri_sorted[is_first]
+        right_tri[face_sorted[is_first]] = neighbor_sorted[is_first]
+
+        return left_tri, right_tri
+
+
 
 if __name__ == "__main__":
     mesh = Mesh()
-    mesh.mesh_generator(maxV=1e-2, marker_boundary=1, x_min=-1., x_max=1., y_min=-1, y_max=1.)
+    mesh.mesh_generator(maxV=3e-3, marker_boundary=1, x_min=-5., x_max=5., y_min=-5., y_max=5.)
     mesh.plot_mesh()
 
 
