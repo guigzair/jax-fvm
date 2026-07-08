@@ -128,12 +128,24 @@ def get_Roe_averaged_state(W_L, W_R, gamma = 1.4):
 
 
 def getgradientLSQ(W_L, W_R, mesh):
-	Delta_x = mesh.barycenter[mesh.neighbors] - mesh.barycenter[...,None,:]  # (N_cells, 3, 2)
-	
+	# Periodic shift: for periodic faces (marker == 1) the neighbor is a real cell on the
+	# opposite edge, so its barycenter must be translated by the domain period to sit next
+	# to the current cell. The shift is midpoint(face) - midpoint(opposite face); it is
+	# exactly zero for interior faces (face_connectivity_opposite is identity there).
+	face_mid = jnp.mean(mesh.points[mesh.faces[mesh.face_connectivity]], axis = -2)  # (N_cells, 3, 2)
+	face_mid_opp = jnp.mean(mesh.points[mesh.faces[mesh.face_connectivity_opposite[mesh.face_connectivity]]], axis = -2)  # (N_cells, 3, 2)
+	shift = face_mid - face_mid_opp  # (N_cells, 3, 2), nonzero only on periodic faces
+	# print("shift", shift.shape, shift)
+
+	Delta_x = mesh.barycenter[mesh.neighbors] + shift - mesh.barycenter[...,None,:]  # (N_cells, 3, 2)
+
+
+	# for different boundary conditions
 	replace = jnp.mean(mesh.points[mesh.faces[mesh.face_connectivity]], axis = -2)
 	replace = 2 * (replace - mesh.barycenter[...,None,:]) # trick in case the face is on the boundary = use face midpoint instead of neighbor cell center
 	
-	Delta_x = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] > 0)[...,None], 2, axis=-1), replace, Delta_x)
+	Delta_x = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] > 1)[...,None], 2, axis=-1), replace, Delta_x)
+
 
 	Delta_w = W_R - W_L
 	weights = 1 / jnp.linalg.norm(Delta_x, axis = -1)**2  # (N_cells, 3)
@@ -151,6 +163,82 @@ def gradient_GG(W_L, W_R, mesh):
 	surfaces = mesh.surface[mesh.face_connectivity]  # (N_cells, 3)
 	grad = jnp.sum(0.5 * (W_R + W_L)[...,None] * mesh.normals[...,None,:] * surfaces[...,None,None], axis=-3) / mesh.area[...,None,None]  # (N_cells, N_vars, 2)
 	return grad
+
+def cell_gradient(Prim, mesh):
+	# Least-square cell-centred gradient of a per-cell field, using the same
+	# periodic-aware face stencil as the solver. Returns (N_cells, N_vars, 2).
+	W_L = jnp.repeat(Prim[...,None,:], 3, axis=-2)  # (N_cells, 3, N_vars)
+	W_R = Prim[mesh.neighbors]                      # (N_cells, 3, N_vars)
+	return getgradientLSQ(W_L, W_R, mesh)
+
+###########################################################################################################
+##########################        Equilibrium (balanced) IC             ###################################
+###########################################################################################################
+
+def equilibrium_pressure_poisson(Primitives, mesh, gamma = 1.4, rho_inf = 1.0,
+								  n_iter = 3, cg_tol = 1e-10, cg_maxiter = 2000):
+	"""
+	Given a (fixed) velocity field, rebuild rho and p so that the initial state is
+	in mechanical equilibrium, grad(p) = -rho (u.grad)u, killing the spurious
+	acoustic transient that a mismatched IC would otherwise radiate.
+
+	Takes the divergence of the momentum balance and solves the finite-volume
+	Poisson problem   div(grad p) = div( -rho (u.grad)u )   on the mesh, with the
+	natural Neumann flux grad(p).n = f.n on physical (marker>1) boundaries and full
+	periodic coupling on marker==1 faces. Density is then recovered from the
+	isentropic law p = K rho^gamma and the whole thing is Picard-iterated a few
+	times because f depends on rho (the velocity field itself is held fixed).
+	"""
+	Prim = Primitives
+	u = Prim[...,1]
+	v = Prim[...,2]
+	p_inf = jnp.mean(Prim[...,3])            # uniform far-field pressure
+	K = p_inf / rho_inf**gamma               # isentropic constant p = K rho^gamma
+
+	# --- convective acceleration a = (u.grad)u  (velocity is fixed -> compute once)
+	grad = cell_gradient(Prim, mesh)         # (N_cells, N_vars, 2)
+	gu = grad[:, 1, :]                        # grad u
+	gv = grad[:, 2, :]                        # grad v
+	a = jnp.stack([u * gu[:, 0] + v * gu[:, 1],
+				   u * gv[:, 0] + v * gv[:, 1]], axis=-1)  # (N_cells, 2)
+
+	# --- face geometry / transmissibilities (periodic shift as in getgradientLSQ)
+	nb = mesh.neighbors                                              # (N_cells, 3)
+	n_f = mesh.normals                                              # (N_cells, 3, 2) unit outward
+	S_f = mesh.surface[mesh.face_connectivity]                      # (N_cells, 3)
+	face_mid = jnp.mean(mesh.points[mesh.faces[mesh.face_connectivity]], axis=-2)
+	face_mid_opp = jnp.mean(mesh.points[mesh.faces[mesh.face_connectivity_opposite[mesh.face_connectivity]]], axis=-2)
+	shift = face_mid - face_mid_opp
+	Delta_x = mesh.barycenter[nb] + shift - mesh.barycenter[...,None,:]  # (N_cells, 3, 2)
+	d2 = jnp.sum(Delta_x**2, axis=-1)                                    # (N_cells, 3)
+	w_f = S_f * jnp.sum(Delta_x * n_f, axis=-1) / (d2 + 1e-30)           # two-point transmissibility
+	interior = mesh.face_markers[mesh.face_connectivity] <= 1            # periodic(1) & interior(0) coupled; wall(>1) = Neumann
+	w_f = jnp.where(interior, w_f, 0.0)
+
+	def matvec(p):
+		# SPD operator: -(integral of Laplacian) + pin of the constant nullspace.
+		lap = jnp.sum(w_f * (p[nb] - p[...,None]), axis=-1)  # sum_f w_f (p_j - p_i) ~ int Lap dV
+		return -lap + jnp.mean(p)
+
+	def build_rhs(rho):
+		f = -rho[...,None] * a                                          # forcing -rho (u.grad)u
+		f_face = jnp.where(interior[...,None], 0.5 * (f[...,None,:] + f[nb]), f[...,None,:])
+		div = jnp.sum(jnp.sum(f_face * n_f, axis=-1) * S_f, axis=-1)     # int div(f) dV per cell
+		div = div - jnp.mean(div)                                       # compatibility (zero mean)
+		return -div                                                    # matches -lap sign in matvec
+
+	rho = rho_inf * jnp.ones_like(u)
+	p = Prim[...,3]
+	for _ in range(n_iter):
+		rhs = build_rhs(rho)
+		p, _ = jax.scipy.sparse.linalg.cg(matvec, rhs, x0=p - jnp.mean(p),
+										  tol=cg_tol, maxiter=cg_maxiter)
+		p = p - jnp.mean(p) + p_inf
+		rho = rho_inf * (p / p_inf)**(1.0 / gamma)
+
+	Prim = Prim.at[...,0].set(rho)
+	Prim = Prim.at[...,3].set(p)
+	return Prim
 
 ###########################################################################################################
 ##############################                  BC                   ######################################
@@ -282,3 +370,16 @@ def get_palinstrophy(grad, mesh):
     return palin
 
 
+if __name__ == "__main__":
+	sys.path.append('../../..')  
+	from jax_fvm.src.config import Case
+	from jax_fvm.src.mesh.mesh import Mesh 
+	mesh = Mesh()
+	# mesh.mesh_generator(maxV = 5.0e-3, marker_boundary = 1, bounds = [-2., 2., -2., 2.])
+
+	case = Case.build("../Cases/config/Euler/corotating_merge.yaml", MeshClass=Mesh)
+	W_L = jnp.repeat(case.primitives[...,None,:], 3, axis=-2)
+	W_R = case.primitives[case.mesh.neighbors]
+	grad = getgradientLSQ(W_L, W_R, case.mesh)
+
+	case.mesh.plot_solution(grad[...,0,0], labels = "grad_rho")

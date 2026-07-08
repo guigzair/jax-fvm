@@ -345,14 +345,24 @@ def residual(W, mesh, **kwargs):
 
 
 if __name__ == "__main__":
-	# cfg_path = "../../Cases/config/corotating_merge.yaml"
+	cfg_path = "../../Cases/config/Euler/corotating_merge.yaml"
 	# cfg_path = "../../Cases/config/KelvinHelmholtz.yaml"
-	cfg_path = "../../Cases/config/DipoleVortex.yaml"
+	# cfg_path = "../../Cases/config/DipoleVortex.yaml"
 	case = Case.build(cfg_path, MeshClass=Mesh)
+
+	# mesh = Mesh()
+	# mesh.mesh_generator(maxV = 1e-3, marker_boundary = 1, bounds = [-1., 1., -1., 1.])
+	# case.mesh = mesh
+	# import jax_fvm.src.Cases.Test_Cases as Test_Cases
+	# case.primitives = Test_Cases.advected_sinus().build(case.mesh)
 
 	kwargs = case.config.kwargs
 
 	W = helper.getConserved(case.primitives, gamma = kwargs['gamma'], M = kwargs.get('M', 1.))
+	Primitives = helper.getPrimitive(W, gamma = kwargs['gamma'], M = kwargs.get('M', 1.))
+	case.mesh.plot_solution(Primitives[...,1], labels = r'Initial condition $u$')
+
+	case.mesh.plot_slice(Primitives[...,1], labels = r'$\rho$')
 
 	t_final = case.config.time.t_end
 	dt = helper.get_dt(W, case.mesh, CFL = case.config.time.cfl)
@@ -360,7 +370,7 @@ if __name__ == "__main__":
 
 	start_time = time.time()
 
-	T_interval_snapshots = 100
+	T_interval_snapshots = 1000
 	Snapshots = jnp.zeros((int(N_t/T_interval_snapshots), *W.shape))
 	for n in range(N_t):
 		W = TimeIntegration.time_step_RK2(W, dt, case.mesh, residual, **kwargs)

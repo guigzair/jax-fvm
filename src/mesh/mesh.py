@@ -67,8 +67,9 @@ class Mesh:
             x_min, x_max, y_min, y_max = bounds
             Lx = x_max - x_min
             Ly = y_max - y_min
-            N_maille_x = 2 * int(np.floor(np.sqrt(1/maxV)) * Lx / Ly)
-            N_maille_y = 2 * int(np.floor(np.sqrt(1/maxV)) * Ly / Ly)
+            m = max(Lx / Ly, Ly / Lx)
+            N_maille_x = 2 * int(np.floor(np.sqrt(1/maxV)) * Lx / m )
+            N_maille_y = 2 * int(np.floor(np.sqrt(1/maxV)) * Ly / m )
 
             boundaries = np.array([[x, y_min] for x in np.linspace(x_min, x_max, N_maille_x)][:-1])
             markers  = [marker_boundary ] * (N_maille_x - 1)
@@ -326,7 +327,7 @@ class Mesh:
 
 if __name__ == "__main__":
     mesh = Mesh()
-    mesh.mesh_generator(maxV=3e-3, marker_boundary=1, x_min=-5., x_max=5., y_min=-5., y_max=5.)
+    mesh.mesh_generator(maxV=3e-3, marker_boundary=1, bounds=[-2., 2., -1., 1.], min_angle=30)
     mesh.plot_mesh()
 
 

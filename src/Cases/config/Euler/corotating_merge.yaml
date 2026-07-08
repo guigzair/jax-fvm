@@ -1,8 +1,8 @@
 name: corotating_merge
 mesh:
   type: None 
-  maxV: 1.0e-4
-  marker_boundary: 2
+  maxV: 2.e-4
+  marker_boundary: 1
   bounds: [-1.5, 1.5, -1.5, 1.5]
 kwargs:
   gamma: 1.4
@@ -10,15 +10,23 @@ kwargs:
   R: 287
   k: 0.30780
   flag_NS: False
-  alpha: 1.
+  alpha: 0.1
 initial_condition:
   type: corotating_merge
   params:
     Gamma: 1.0
     r0: 0.18
-    D0: 1.0
+    D0: 0.5
     center: [0., 0.]
+    Mach: 0.02
+    window: False
+  # params:
+  #   R: 0.1
+  #   omega: 2.
+  #   mach: 0.05
+  #   rho_0: 1.0
+  #   D0: 0.15
 time:
   cfl: 0.4
-  t_end: 40.0
+  t_end: 1.5
   scheme: rk2
